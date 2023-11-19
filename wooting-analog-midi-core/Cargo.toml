@@ -2,16 +2,14 @@
 name = "wooting-analog-midi-core"
 version = "0.1.0"
 authors = ["simon-wh <simon.whyte.lb@gmail.com>"]
-edition = "2018"
+edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-midir = "0.8.0"
+midir = "0.9"
 wooting-analog-wrapper = { git = "https://github.com/WootingKb/wooting-analog-sdk", branch = "develop", features = ["serdes"] }
-# ctrlc = { version = "3", features = ["termination"] }
 log = "0.4"
 lazy_static = "1.4"
 serde = { version = "1.0", features = ["derive"] }
 anyhow = "1.0"
-# iced = "0.1"

@@ -1,21 +1,12 @@
-extern crate midir;
-extern crate wooting_analog_wrapper;
-#[allow(unused_imports)]
-#[macro_use]
-extern crate lazy_static;
-#[macro_use]
-extern crate anyhow;
-
-use log::*;
+use anyhow::{anyhow, bail, Context, Result};
+use log::{info, trace};
+use midir::{MidiOutput, MidiOutputConnection};
 use sdk::SDKResult;
 pub use sdk::{DeviceInfo, FromPrimitive, HIDCodes, ToPrimitive, WootingAnalogResult};
-use wooting_analog_wrapper as sdk;
-
-use anyhow::{Context, Result};
-use midir::{MidiOutput, MidiOutputConnection};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Instant;
+use wooting_analog_wrapper as sdk;
 
 const DEVICE_BUFFER_MAX: usize = 5;
 const ANALOG_BUFFER_READ_MAX: usize = 40;
@@ -26,7 +17,7 @@ const POLY_AFTERTOUCH_MSG: u8 = 0xA0;
 // The analog threshold at which we consider a note being turned on
 // const THRESHOLD: f32 = 0.5;
 // What counts as a key being pressed. Currently used for modifier press detection
-const ACTUATION_POINT: f32 = 0.2;
+const MODIFIER_ACTUATION_POINT: f32 = 0.2;
 const MODIFIER_KEY: HIDCodes = HIDCodes::LeftShift;
 const AFTERTOUCH: bool = true;
 // How many times a second we'll check for updates on how much keys are pressed
@@ -77,8 +68,12 @@ impl NoteSink for MidiOutputConnection {
     }
 }
 
+fn default_actuation_point() -> f32 {
+    0.0
+}
+
 fn default_threshold() -> f32 {
-    0.5
+    0.8
 }
 
 fn default_velocity_scale() -> f32 {
@@ -87,33 +82,43 @@ fn default_velocity_scale() -> f32 {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NoteConfig {
+    #[serde(default = "default_actuation_point")]
+    actuation_point: f32,
     #[serde(default = "default_threshold")]
     threshold: f32,
     #[serde(default = "default_velocity_scale")]
     velocity_scale: f32,
-    // Any new properties should have a default added to it to ensure old configs get pulled in properly
 }
 
 impl NoteConfig {
-    pub fn new(threshold: f32, velocity_scale: f32) -> Self {
+    pub fn new(actuation_point: f32, threshold: f32, velocity_scale: f32) -> Self {
         NoteConfig {
+            actuation_point,
             threshold,
             velocity_scale,
         }
     }
 
-    pub fn threshold(&self) -> &f32 {
-        &self.threshold
+    pub fn actuation_point(&self) -> f32 {
+        self.actuation_point
     }
 
-    pub fn velocity_scale(&self) -> &f32 {
-        &self.velocity_scale
+    pub fn threshold(&self) -> f32 {
+        self.threshold
+    }
+
+    pub fn velocity_scale(&self) -> f32 {
+        self.velocity_scale
     }
 }
 
 impl Default for NoteConfig {
     fn default() -> Self {
-        NoteConfig::new(default_threshold(), default_velocity_scale())
+        NoteConfig::new(
+            default_actuation_point(),
+            default_threshold(),
+            default_velocity_scale(),
+        )
     }
 }
 
@@ -124,7 +129,7 @@ pub struct Note {
     shifted_amount: i8,
     pub velocity: f32,
     pub channel: Channel,
-    pub lower_press_time: Option<(Instant, f32)>,
+    lower_press: Option<(Instant, f32)>,
 }
 
 impl Note {
@@ -135,7 +140,7 @@ impl Note {
             velocity: 0.0,
             shifted_amount: 0,
             channel,
-            lower_press_time: None,
+            lower_press: None,
         }
     }
 
@@ -170,33 +175,26 @@ impl Note {
         //     );
         // }
         // Initialise the
-        if (new_value > 0.0 && previous_value == 0.0 && new_value < note_config.threshold)
-            || new_value == 0.0
+        if (previous_value <= note_config.actuation_point()
+            && new_value > note_config.actuation_point()
+            && new_value < note_config.threshold())
+            || new_value <= note_config.actuation_point()
         {
-            self.lower_press_time = Some((Instant::now(), new_value));
+            self.lower_press = Some((Instant::now(), new_value));
 
             self.velocity = 0.0;
-        } else if self.lower_press_time.is_some() {
-            let (prev_time, prev_depth) = self.lower_press_time.expect("No previous press time");
+        } else if let Some((prev_time, prev_depth)) = self.lower_press {
             let duration = prev_time.elapsed().as_secs_f32();
             // If there's no change there's no velocity
-            if new_value == prev_depth {
-                self.velocity = 0.0;
+            self.velocity = if new_value != prev_depth {
+                ((new_value - prev_depth) / duration * note_config.velocity_scale() / 100.0)
+                    .clamp(0.0, 1.0)
             } else {
-                self.velocity = f32::min(
-                    f32::max(
-                        ((new_value - prev_depth) / duration)
-                            * (note_config.velocity_scale() / 100.0), // The / 100 is to change the scale of the velocity scale, without it, you have to be working with very small decimal numbers to make noticeable differences in the scale of the velocity
-                        0.0,
-                    ),
-                    1.0,
-                );
-            }
+                0.0
+            };
             // If the value has gone down or there's little difference between the saved previous depth and the new one, so we want to take the time again so the velocity estimate is more accurate
-            if (self.lower_press_time.expect("No press time").1 - new_value).abs() < 0.01
-                || new_value < previous_value - 0.01
-            {
-                self.lower_press_time = Some((Instant::now(), new_value));
+            if (prev_depth - new_value).abs() < 0.01 || new_value < previous_value - 0.01 {
+                self.lower_press = Some((Instant::now(), new_value));
             }
         }
 
@@ -212,15 +210,15 @@ impl Note {
         }
 
         if let Some(effective_note) = self.get_effective_note() {
-            if new_value > *note_config.threshold() {
+            if new_value > note_config.threshold() {
                 // 'Pressed'
                 if !self.pressed {
                     info!(
                         "Triggering with velocity {:?}, prev {:?}, new_val {:?}, elapsed {:?}",
                         self.velocity,
-                        self.lower_press_time,
+                        self.lower_press,
                         new_value,
-                        self.lower_press_time.unwrap().0.elapsed()
+                        self.lower_press.unwrap().0.elapsed()
                     );
                     sink.note_on(effective_note, self.velocity, self.channel)?;
                     self.pressed = true;
@@ -381,7 +379,7 @@ impl MidiService {
                     .unwrap();
                 assert_eq!(device_num, devices.len() as u32);
                 for (i, device) in devices.iter().enumerate() {
-                    println!("Device {} is {:?}", i, device);
+                    info!("Device {} is {:?}", i, device);
                 }
 
                 device_num
@@ -466,7 +464,7 @@ impl MidiService {
                 let modifier_pressed = (*analog_data
                     .get(&MODIFIER_KEY.to_u16().unwrap())
                     .unwrap_or(&0.0))
-                    >= ACTUATION_POINT;
+                    >= MODIFIER_ACTUATION_POINT;
                 for (key_id, key) in self.keys.iter_mut() {
                     let code = key_id.to_u16().expect("Failed to convert HIDCode to u16");
                     let value = analog_data.get(&code).unwrap_or(&0.0);
@@ -499,6 +497,7 @@ impl MidiService {
         trace!("MidiService uninit complete");
     }
 }
+
 impl Drop for MidiService {
     fn drop(&mut self) {
         self.uninit();
