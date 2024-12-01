@@ -1,14 +1,12 @@
-use std::{
-    collections::HashMap,
-    sync::{atomic::AtomicBool, Arc, Mutex},
-    thread::{self, JoinHandle},
-};
-
 use anyhow::Result;
 use env_logger::Env;
 use image::{load_from_memory_with_format, ImageFormat};
 use log::info;
-use spin_sleep::LoopHelper;
+use std::{
+    sync::{Arc, Mutex},
+    thread::{self, JoinHandle},
+    time::Duration,
+};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tray_icon::{
     menu::{AboutMetadata, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
@@ -32,26 +30,24 @@ impl Service {
 
 fn spawn_polling_loop(service: &Arc<Mutex<Service>>) -> JoinHandle<Result<()>> {
     let service = service.clone();
-    thread::spawn(move || -> Result<()> {
+    thread::spawn(move || {
         info!("Starting polling loop");
-        let mut loop_helper = LoopHelper::builder()
-            .report_interval_s(1.0)
-            .build_with_target_rate(200.0);
+
+        let duration = Duration::from_secs_f64(1.0 / 500.0);
+        let mut interval = spin_sleep_util::interval(duration)
+            .with_missed_tick_behavior(spin_sleep_util::MissedTickBehavior::Delay);
+        let mut reporter = spin_sleep_util::RateReporter::new(Duration::from_secs_f64(1.0));
 
         loop {
-            loop_helper.loop_start();
-            if let Some(fps) = loop_helper.report_rate() {
-                info!("Current polling rate: {:.2}/s", fps);
+            interval.tick();
+            if let Some(tps) = reporter.increment_and_report() {
+                info!("Current polling rate: {:.2}Hz", tps);
             }
-
             let mut service = service.lock().unwrap();
             if service.stop {
                 return Ok(());
             }
             service.midi.poll()?;
-            drop(service);
-
-            loop_helper.loop_sleep();
         }
     })
 }
@@ -115,7 +111,7 @@ fn main() -> Result<()> {
     {
         let mut service = service.lock().unwrap();
         service.midi.init()?;
-        service.midi.select_port(1)?;
+        service.midi.select_port(0)?;
         // info!("Ports: {:#?}", service.midi.port_options);
         let mapping = [
             (HIDCodes::F13, vec![(0, 60)]),

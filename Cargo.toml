@@ -5,12 +5,15 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[workspace]
+members = ["wooting-analog-midi-core"]
+
 [dependencies]
 wooting-analog-midi-core = { path = "./wooting-analog-midi-core/" }
-tray-icon = "0.10"
-tao = "0.23"
-image = { version = "*", default-features = false, features = ["png"] }
+tray-icon = "0.19"
+tao = "0.30"
+image = { version = "0.25", default-features = false, features = ["png"] }
 anyhow = "1.0"
-spin_sleep = "1.1"
+spin_sleep_util = "0.1"
 log = "0.4"
-env_logger = "0.10"
+env_logger = "0.11"

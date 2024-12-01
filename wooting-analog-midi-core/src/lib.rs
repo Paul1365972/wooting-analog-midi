@@ -1,12 +1,14 @@
 use anyhow::{anyhow, bail, Context, Result};
 use log::{info, trace};
-use midir::{MidiOutput, MidiOutputConnection};
+use midir::{MidiOutput, MidiOutputConnection, MidiOutputPort};
 use sdk::SDKResult;
 pub use sdk::{DeviceInfo, FromPrimitive, HIDCodes, ToPrimitive, WootingAnalogResult};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Instant;
 use wooting_analog_wrapper as sdk;
+
+const MIDI_CLIENT_NAME: &str = "Wooting Analog MIDI Output";
+const MIDI_PORT_NAME: &str = "wooting-analog-midi";
 
 const DEVICE_BUFFER_MAX: usize = 5;
 const ANALOG_BUFFER_READ_MAX: usize = 40;
@@ -80,13 +82,10 @@ fn default_velocity_scale() -> f32 {
     5.0
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct NoteConfig {
-    #[serde(default = "default_actuation_point")]
     actuation_point: f32,
-    #[serde(default = "default_threshold")]
     threshold: f32,
-    #[serde(default = "default_velocity_scale")]
     velocity_scale: f32,
 }
 
@@ -317,26 +316,28 @@ fn generate_note_mapping() -> HashMap<HIDCodes, Key> {
         .collect()
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct PortOption(usize, String, bool);
+pub struct PortOption {
+    port: MidiOutputPort,
+    name: String,
+}
 
 pub struct MidiService {
-    pub port_options: Option<Vec<PortOption>>,
+    pub port_options: Vec<PortOption>,
     connection: Option<MidiOutputConnection>,
     pub keys: HashMap<HIDCodes, Key>,
     pub amount_to_shift: i8,
     pub note_config: NoteConfig,
 }
 
-//TODO: Determine if this is safe (LUL imagine saying it may be safe when it literally says unsafe) or a different solution is required
+// TODO: Determine if this is safe (LUL imagine saying it may be safe when it literally says unsafe) or a different solution is required
 // Tbf haven't ran into any issues yet, so might be okay
-unsafe impl Send for MidiService {}
-unsafe impl Sync for MidiService {}
+// unsafe impl Send for MidiService {}
+// unsafe impl Sync for MidiService {}
 
 impl MidiService {
     pub fn new() -> Self {
         MidiService {
-            port_options: None,
+            port_options: Vec::new(),
             connection: None,
             keys: generate_note_mapping(),
             amount_to_shift: 0,
@@ -387,69 +388,56 @@ impl MidiService {
             Err(e) => Err(e).context("Wooting Analog SDK Failed to initialise")?,
         };
 
-        let midi_out = MidiOutput::new("Wooting Analog MIDI Output")?;
+        self.refresh_port_options();
 
-        let ports = midi_out.ports();
-        self.port_options = Some(
-            ports
-                .iter()
-                .enumerate()
-                .map(|(i, port)| PortOption(i, midi_out.port_name(&port).unwrap(), i == 0))
-                .collect(),
-        );
-        info!("We have {} ports available!", ports.len());
-        if ports.len() > 0 {
+        if self.port_options.len() > 0 {
             info!("Opening connection");
-            self.connection = Some(
-                midi_out
-                    .connect(&ports[0], "wooting-analog-midi")
-                    .map_err(|e| anyhow!("Error: {}", e))?,
-            );
+            self.select_port(0).unwrap();
         } else {
             info!("No output ports available!");
         }
-        // self.port_options = Some(midi_out);
+
         Ok(device_num)
     }
 
-    pub fn get_connected_devices(&self) -> Result<Vec<DeviceInfo>> {
-        return Ok(sdk::get_connected_devices_info(DEVICE_BUFFER_MAX).0?);
+    pub fn refresh_port_options(&mut self) {
+        let midi_output = MidiOutput::new(MIDI_CLIENT_NAME).unwrap();
+
+        self.port_options = midi_output
+            .ports()
+            .into_iter()
+            .map(|port| {
+                let name = midi_output.port_name(&port).unwrap();
+                PortOption { port, name }
+            })
+            .collect();
+        info!(
+            "We have {} ports available! ({:?})",
+            self.port_options.len(),
+            self.port_options
+                .iter()
+                .map(|port| &port.name)
+                .collect::<Vec<_>>()
+        );
     }
 
     pub fn select_port(&mut self, option: usize) -> Result<()> {
-        //TODO: Deal with the case where the port list has changed since the `port_options` was generated
-        if let Some(options) = &self.port_options {
-            if option >= options.len() {
-                bail!("Port option out of range!");
-            }
-
-            let selection = &options[option];
-
-            // Port is already the selected one, don't need to do anything
-            if selection.2 {
-                return Ok(());
-            }
-
-            let midi_out = MidiOutput::new("Wooting Analog MIDI Output")?;
-            let ports = midi_out.ports();
-            self.port_options = Some(
-                ports
-                    .iter()
-                    .enumerate()
-                    .map(|(i, port)| PortOption(i, midi_out.port_name(&port).unwrap(), i == option))
-                    .collect(),
-            );
-
-            self.connection = Some(
-                midi_out
-                    .connect(&ports[option], "wooting-analog-midi")
-                    .map_err(|e| anyhow!("Error: {}", e))?,
-            );
-
-            Ok(())
-        } else {
-            return Err(anyhow!("Port options not initialised"));
+        if option >= self.port_options.len() {
+            bail!("Port option out of range!");
         }
+        drop(self.connection.take());
+
+        let selection = &self.port_options[option];
+        info!("Connecting to Port {}: \"{}\"!", option, selection.name);
+
+        let midi_output = MidiOutput::new(MIDI_CLIENT_NAME).unwrap();
+        self.connection = Some(
+            midi_output
+                .connect(&selection.port, MIDI_PORT_NAME)
+                .map_err(|e| anyhow!("Error: {}", e))?,
+        );
+
+        Ok(())
     }
 
     pub fn poll(&mut self) -> Result<()> {
@@ -485,6 +473,10 @@ impl MidiService {
             }
         };
         Ok(())
+    }
+
+    pub fn get_connected_devices(&self) -> Result<Vec<DeviceInfo>> {
+        return Ok(sdk::get_connected_devices_info(DEVICE_BUFFER_MAX).0?);
     }
 
     pub fn uninit(&mut self) {
