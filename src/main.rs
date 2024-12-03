@@ -3,6 +3,7 @@ use env_logger::Env;
 use image::{load_from_memory_with_format, ImageFormat};
 use log::info;
 use std::{
+    collections::HashMap,
     sync::{Arc, Mutex},
     thread::{self, JoinHandle},
     time::Duration,
@@ -12,7 +13,10 @@ use tray_icon::{
     menu::{AboutMetadata, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     TrayIconBuilder, TrayIconEvent,
 };
-use wooting_analog_midi_core::{HIDCodes, MidiService};
+use wooting_analog_midi_core::{
+    config::{Config, KeyConfig},
+    HIDCodes, MidiService, NoteID, REFRESH_RATE,
+};
 
 struct Service {
     midi: MidiService,
@@ -33,7 +37,7 @@ fn spawn_polling_loop(service: &Arc<Mutex<Service>>) -> JoinHandle<Result<()>> {
     thread::spawn(move || {
         info!("Starting polling loop");
 
-        let duration = Duration::from_secs_f64(1.0 / 500.0);
+        let duration = Duration::from_secs_f32(1.0 / REFRESH_RATE);
         let mut interval = spin_sleep_util::interval(duration)
             .with_missed_tick_behavior(spin_sleep_util::MissedTickBehavior::Delay);
         let mut reporter = spin_sleep_util::RateReporter::new(Duration::from_secs_f64(1.0));
@@ -113,37 +117,52 @@ fn main() -> Result<()> {
         service.midi.init()?;
         service.midi.select_port(0)?;
         // info!("Ports: {:#?}", service.midi.port_options);
-        let mapping = [
-            (HIDCodes::F13, vec![(0, 60)]),
-            (HIDCodes::F14, vec![(0, 61)]),
-            (HIDCodes::F15, vec![(0, 62)]),
-            (HIDCodes::F16, vec![(0, 63)]),
-            (HIDCodes::F17, vec![(0, 64)]),
-            (HIDCodes::F18, vec![(0, 65)]),
-            (HIDCodes::F19, vec![(0, 66)]),
-            (HIDCodes::F20, vec![(0, 67)]),
-            (HIDCodes::F21, vec![(0, 68)]),
-            (HIDCodes::F22, vec![(0, 69)]),
-            (HIDCodes::F23, vec![(0, 70)]),
-            (HIDCodes::F24, vec![(0, 71)]),
-            (HIDCodes::Numpad1, vec![(0, 72)]),
-            (HIDCodes::Numpad2, vec![(0, 73)]),
-            (HIDCodes::Numpad3, vec![(0, 74)]),
-            (HIDCodes::Numpad4, vec![(0, 75)]),
-            (HIDCodes::Numpad5, vec![(0, 76)]),
-            (HIDCodes::Numpad6, vec![(0, 77)]),
-            (HIDCodes::Numpad7, vec![(0, 78)]),
-        ]
-        .iter()
-        .cloned()
-        .collect();
-        service.midi.update_mapping(&mapping)?;
-        service.midi.amount_to_shift = 12;
+        let config = create_config();
+        service.midi.set_config(config)?;
     }
 
     let handle = spawn_polling_loop(&service);
 
     run_event_loop(service, handle)
+}
+
+fn create_config() -> Config {
+    let mut key_configs = HashMap::default();
+    for (index, code) in [
+        HIDCodes::Q,
+        HIDCodes::N2,
+        HIDCodes::W,
+        HIDCodes::E,
+        HIDCodes::R,
+        HIDCodes::N5,
+        HIDCodes::T,
+        HIDCodes::N6,
+        HIDCodes::T,
+        HIDCodes::N7,
+        HIDCodes::U,
+        HIDCodes::I,
+        HIDCodes::N9,
+        HIDCodes::O,
+        HIDCodes::N0,
+        HIDCodes::P,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        key_configs.insert(
+            code,
+            KeyConfig {
+                note_id: 60 + index as NoteID,
+                ..Default::default()
+            },
+        );
+    }
+
+    return Config {
+        key_configs,
+        toggle_keys: vec![HIDCodes::F12],
+        ..Default::default()
+    };
 }
 
 fn load_icon() -> tray_icon::Icon {
